@@ -1,0 +1,23 @@
+1. Looking at the backtrace output, which function called syscall?
+	usertrap()
+
+2. Type n a few times to step past struct proc *p = myproc(); Once past this statement, type p /x *p, which prints the current process's proc struct (see kernel/proc.h>) in hex.
+	$1 = {lock = {locked = 0x0, name = 0x800071c8, cpu = 0x0}, state = 0x4, chan = 0x0, killed = 0x0, xstate = 0x0, pid = 0x1, parent = 0x0, kstack = 0x3fffffd000, sz = 0x1000, pagetable = 0x87f55000,
+  trapframe = 0x87f56000, context = {ra = 0x800012ae, sp = 0x3fffffde80, s0 = 0x3fffffdeb0, s1 = 0x8000a670, s2 = 0x8000a240, s3 = 0x1, s4 = 0x800104f8, s5 = 0x3, s6 = 0x8001b310, s7 = 0x1, s8 = 0x8001b438,
+    s9 = 0x4, s10 = 0x0, s11 = 0x0}, ofile = {0x0 <repeats 16 times>}, cwd = 0x80018780, name = {0x69, 0x6e, 0x69, 0x74, 0x63, 0x6f, 0x64, 0x65, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}}
+
+3. What is the value of p->trapframe->a7 and what does that value represent? (Hint: look user/initcode.S, the first user program xv6 starts.)
+	p->trapframe->a7: 7, it represents the system call we're trying to run
+
+4. What was the previous mode that the CPU was in?
+	user mode
+
+5. Write down the assembly instruction the kernel is panicing at. Which register corresponds to the variable num?
+	lw	a3,0(zero) # 0 <_entry-0x80000000> 
+	a3 is associated with num
+
+6. Why does the kernel crash?
+	Because the virtual address 0 has no valid page mapping to physical memory, thus leading to the scause error 13, load page fault.
+
+7. What is the name of the process that was running when the kernel paniced? What is its process id (pid)?
+	name: initcode, pid: 1
