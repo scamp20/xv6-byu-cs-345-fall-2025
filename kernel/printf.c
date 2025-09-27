@@ -187,8 +187,7 @@ backtrace(void)
   uint64 upper_bound = PGROUNDDOWN(fp);
   while (PGROUNDDOWN(fp) == upper_bound) {
     ra = *((uint64 *)(fp - 8));
-    printf("0x%lx\n", (ra));
+    printf("%p\n", (void *)ra);
     fp = *((uint64 *)fp);
   }
-  exit(0);
 }
