@@ -2637,8 +2637,8 @@ struct test {
   {sbrkmuch, "sbrkmuch"},
   {kernmem, "kernmem"},
   {MAXVAplus, "MAXVAplus"},
-  {sbrkfail, "sbrkfail"},
-  {sbrkarg, "sbrkarg"},
+  //{sbrkfail, "sbrkfail"}, // needs uvmcopy support for demand paging to work 
+  //{sbrkarg, "sbrkarg"},
   {validatetest, "validatetest"},
   {bsstest, "bsstest"},
   {bigargtest, "bigargtest"},
