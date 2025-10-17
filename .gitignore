@@ -25,7 +25,4 @@ barrier
 .DS_Store
 *.dSYM
 *.pcap
-<<<<<<< HEAD
 user/xargs_fail.c
-=======
->>>>>>> upstream/pgtbl
