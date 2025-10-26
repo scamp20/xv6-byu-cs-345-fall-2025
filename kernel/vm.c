@@ -187,6 +187,36 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
+int
+demandmappages(pagetable_t pagetable, uint64 va, uint64 size, int perm)
+{
+  uint64 a, last;
+  pte_t *pte;
+
+  if((va % PGSIZE) != 0)
+    panic("mappages: va not aligned");
+
+  if((size % PGSIZE) != 0)
+    panic("mappages: size not aligned");
+
+  if(size == 0)
+    panic("mappages: size");
+  
+  a = va;
+  last = va + size - PGSIZE;
+  for(;;){
+    if((pte = walk(pagetable, a, 1)) == 0)
+      return -1;
+    if(*pte & PTE_V)
+      panic("mappages: remap");
+    *pte = PA2PTE(PHYSTOP+(2*PGSIZE)) | perm;
+    if(a == last)
+      break;
+    a += PGSIZE;
+  }
+  return 0;
+}
+
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
@@ -205,6 +235,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0) {
+      // if the pa is my magic number, then continue
+      if (PTE2PA(*pte) == (PHYSTOP+(2*PGSIZE))) {
+        *pte = 0;
+        continue;
+      }
       printf("va=%ld pte=%ld\n", a, *pte);
       panic("uvmunmap: not mapped");
     }
@@ -273,6 +308,26 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 #endif
     if(mappages(pagetable, a, sz, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
       kfree(mem);
+      uvmdealloc(pagetable, a, oldsz);
+      return 0;
+    }
+  }
+  return newsz;
+}
+
+uint64
+uvmdemandalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+{
+  uint64 a;
+  int sz;
+
+  if(newsz < oldsz)
+    return oldsz;
+
+  oldsz = PGROUNDUP(oldsz);
+  for(a = oldsz; a < newsz; a += sz){
+    sz = PGSIZE;
+    if(demandmappages(pagetable, a, sz, PTE_R|PTE_U|xperm) != 0){
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
@@ -488,17 +543,72 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 
 
 #ifdef LAB_PGTBL
-void
-vmprint(pagetable_t pagetable) {
-  // your code here
+void vmprint_entries(pagetable_t pagetable, signed long long base, int level) {
+  for(int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V) {
+      for(int j = 0; level + j < 3; j++) {
+        printf(" ..");
+      }
+      signed long long va = (((((signed long long)i << 12) << 9*level) + base) << 26) >> 26;
+      printf("%p: pte %p pa %p\n", (void *)(va), (void *)pte, (void *)PTE2PA(pte));
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+        uint64 child = PTE2PA(pte);
+        vmprint_entries((pagetable_t)child, va, level - 1);
+      }
+    }
+  }
 }
-#endif
 
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  vmprint_entries(pagetable, 0, 2);
+}
 
-
-#ifdef LAB_PGTBL
 pte_t*
 pgpte(pagetable_t pagetable, uint64 va) {
   return walk(pagetable, va, 0);
+}
+
+int handle_page_fault(uint64 va) {
+  struct proc *p = myproc();
+
+  // check va is valid
+  if (va >= MAXVA) {
+    return -1;
+  }
+
+  // get start of va's page
+  uint64 a = PGROUNDDOWN(va);
+
+  // get pte for a
+  pte_t *pte = walk(p->pagetable, a, 0);
+  if (pte == 0) {
+    return -1;
+  }
+
+  // make sure pte is not valid
+  if ((*pte & PTE_V) != 0) {
+    return -1;
+  }
+
+  // make sure pte's pa is my magic number
+  if (PTE2PA(*pte) != (PHYSTOP+(2*PGSIZE))) {
+    return -1;
+  }
+
+  // allocate a physical page
+  char *mem = kalloc();
+  if (mem == 0) {
+    return -1;
+  }
+
+  // set entire page to zero
+  memset(mem, 0, PGSIZE);
+
+  // update pte to point to new page, set valid bit
+  *pte = PA2PTE((uint64)mem) | (PTE_FLAGS(*pte) | PTE_V);
+  
+  return 0;
 }
 #endif

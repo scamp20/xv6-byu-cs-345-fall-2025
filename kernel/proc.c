@@ -134,7 +134,7 @@ found:
 
   // add a read-only page to store pid
   p->usyscall = (struct usyscall *)kalloc();
-  if(p->usyscall == 0){
+  if(p->usyscall == 0) {
       freeproc(p);
       release(&p->lock);
       return 0;
@@ -167,6 +167,11 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+  if(p->usyscall)
+    kfree((void*)p->usyscall);
+  p->usyscall = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -178,11 +183,6 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
-  
-  if(p->usyscall){
-    kfree((void*)p->usyscall);
-    p->usyscall = 0;
-  }
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -232,6 +232,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmfree(pagetable, sz);
 }
 
@@ -284,7 +285,7 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
+    if((sz = uvmdemandalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
     }
   } else if(n < 0){
