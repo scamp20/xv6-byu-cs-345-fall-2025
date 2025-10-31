@@ -9,6 +9,10 @@
 #include "riscv.h"
 #include "defs.h"
 
+// page reference counts
+#define NPAGES ((PHYSTOP - KERNBASE) / PGSIZE)
+static int refcount[NPAGES];
+
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -51,12 +55,19 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  acquire(&kmem.lock);
+  int idx = addrToIndex((uint64)pa);
+  refcount[idx]--;
+  if(refcount[idx] > 0) {
+    release(&kmem.lock);
+    return;
+  }
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
@@ -72,11 +83,43 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    refcount[addrToIndex((uint64)r)] = 1;
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+
   return (void*)r;
+}
+
+// Increment the reference count for a given physical page.
+void krefinc(uint64 pa) {
+  acquire(&kmem.lock);
+  int idx = addrToIndex(pa);
+  refcount[idx]++;
+  release(&kmem.lock);
+}
+
+// Return the reference count for a given physical page.
+int krefcount(uint64 pa) {
+  int count;
+  acquire(&kmem.lock);
+  int idx = addrToIndex(pa);
+  count = refcount[idx];
+  release(&kmem.lock);
+  return count;
+}
+
+int addrToIndex(uint64 pa) {
+  return (pa - KERNBASE) >> 12;
+}
+
+void decrementKRef(uint64 pa) {
+  acquire(&kmem.lock);
+  int idx = addrToIndex(pa);
+  refcount[idx]--;
+  release(&kmem.lock);
 }
