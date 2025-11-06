@@ -94,14 +94,33 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(char *buf, int len)
 {
-  //
-  // Your code here.
-  //
   // buf contains an ethernet frame; program it into
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after send completes.
-  //
 
+  // sanity check
+  if (!buf || len < 1 || len > PGSIZE) return -1;
+
+  // get ring index for next packet (tail)
+  uint32 tdt = regs[E1000_TDT];
+
+  // check to make sure the previous transmission is done
+  if ((tx_ring[tdt].status & E1000_TXD_STAT_DD) == 0) return -1;
+
+  // free up the slot if used
+  if (tx_bufs[tdt]) {
+    kfree(tx_bufs[tdt]);
+    tx_bufs[tdt] = 0; 
+  }
+
+  // Store new transmission details in the slot
+  tx_ring[tdt].addr = (uint64)buf;
+  tx_ring[tdt].length = len;
+  tx_ring[tdt].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_bufs[tdt] = buf;
+
+  // Update tail index
+  regs[E1000_TDT] = (tdt + 1) % TX_RING_SIZE;
   
   return 0;
 }
@@ -109,13 +128,53 @@ e1000_transmit(char *buf, int len)
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
   // Check for packets that have arrived from the e1000
   // Create and deliver a buf for each packet (using net_rx()).
   //
 
+  // get lock
+  acquire(&e1000_lock);
+
+  // get last finished read slot
+  uint32 rdt = regs[E1000_RDT];
+
+  // skip past the finished slot to get to the first slot that's ready to receive
+  uint32 idx = (rdt + 1) % RX_RING_SIZE;
+
+  // while the next slot is available to receive
+  while ((rx_ring[idx].status & E1000_RXD_STAT_DD) != 0) {
+
+    // get the packet length and associated buffer to receive
+    int pkt_len = rx_ring[idx].length;
+    void *buf = rx_bufs[idx];
+
+    // send the buffer up to the network stack
+    net_rx(buf, pkt_len);
+
+    // now we don't care about that buffer anymore, so we'll put a new on in its place
+    void *newbuf = kalloc();
+    if (!newbuf) {
+      printf("e1000_recv: kalloc failed\n");
+      return;
+    }
+
+    // store the new buffer and the descriptions in the rings of descriptors and bufs
+    rx_bufs[idx] = newbuf;
+    rx_ring[idx].addr = (uint64)newbuf;
+    rx_ring[idx].status = 0;
+
+    // set rdt to be most recently received slot
+    rdt = idx;
+
+    // just for the for loop
+    idx = (idx + 1) % RX_RING_SIZE;
+  }
+
+  // save rdt for later
+  regs[E1000_RDT] = rdt;
+
+  // release lock
+  release(&e1000_lock);
 }
 
 void

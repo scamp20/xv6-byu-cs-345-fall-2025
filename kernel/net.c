@@ -10,6 +10,27 @@
 #include "file.h"
 #include "net.h"
 
+#define MAX_QUEUE 16
+#define MAX_BOUND_PORTS 128
+
+struct packet {
+  uint32 srcip;
+  uint16 sport;
+  uint16 len;
+  char *data;
+};
+
+struct udp_queue {
+  struct packet pkts[MAX_QUEUE];
+  int head;
+  int tail;
+  int count;
+};
+
+static struct udp_queue udpq[MAX_BOUND_PORTS];
+static int bound_ports[MAX_BOUND_PORTS];
+static int nbound = 0;
+
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
@@ -23,8 +44,36 @@ void
 netinit(void)
 {
   initlock(&netlock, "netlock");
+
+  for (int i = 0; i < MAX_BOUND_PORTS; i++) {
+    bound_ports[i] = 0;
+  }
+
+  for (int i = 0; i < MAX_BOUND_PORTS; i++) {
+    udpq[i].head = 0;
+    udpq[i].tail = 0;
+    udpq[i].count = 0;
+    memset(udpq[i].pkts, 0, sizeof(udpq[i].pkts));
+  }
 }
 
+int queue_pkt(struct udp_queue *q, struct packet *p) {
+  if (q->count == MAX_QUEUE)
+    return -1;
+  q->pkts[q->tail] = *p;
+  q->tail = (q->tail + 1) % MAX_QUEUE;
+  q->count++;
+  return 0;
+}
+
+int dequeue_pkt(struct udp_queue *q, struct packet *p) {
+  if (q->count == 0)
+    return -1;  // queue empty
+  *p = q->pkts[q->head];
+  q->head = (q->head + 1) % MAX_QUEUE;
+  q->count--;
+  return 0;
+}
 
 //
 // bind(int port)
@@ -34,11 +83,22 @@ netinit(void)
 uint64
 sys_bind(void)
 {
-  //
-  // Your code here.
-  //
+  int port;
+  argint(0, &port);
 
-  return -1;
+  if (port < 0 || port > 65535) return -1;
+
+  for (int i = 0; i < nbound; i++) {
+    if (bound_ports[i] == port)
+      return 0; // already bound
+  }
+
+  if (nbound < MAX_BOUND_PORTS) {
+    bound_ports[nbound] = port;
+    nbound++;
+  } else return -1; // too many ports already bound
+
+  return 0;
 }
 
 //
@@ -74,10 +134,67 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
-  //
-  // Your code here.
-  //
-  return -1;
+  struct proc *p = myproc();
+  int dport;
+  uint64 src_addr, sport_addr, buf_addr;
+  int maxlen;
+
+  argint(0, &dport);
+  argaddr(1, &src_addr);
+  argaddr(2, &sport_addr);
+  argaddr(3, &buf_addr);
+  argint(4, &maxlen);
+
+  // find bound port index
+  int i;
+  for (i = 0; i < nbound; i++) {
+    if (bound_ports[i] == dport)
+      break;
+  }
+  if (i == nbound)
+    return -1; // not bound
+
+  // get the lock since sleep will handle dropping it and picking it back up
+  acquire(&netlock);
+
+  // wait until there's something in the queue
+  while (udpq[i].count == 0)
+    sleep(&udpq[i], &netlock);
+
+  // dequeue packet
+  struct packet pkt;
+  if (dequeue_pkt(&udpq[i], &pkt) < 0) {
+    release(&netlock);
+    return -1;
+  }
+
+  // give back the lock since the dequeuing is done
+  release(&netlock);
+
+  // only copy up to max length bytes
+  int n = pkt.len;
+  if (n > maxlen)
+    n = maxlen;
+
+  // copy the pkt.data over into the user's buffer pointed to by buf_addr
+  if (copyout(p->pagetable, buf_addr, pkt.data, n) < 0) {
+    kfree(pkt.data);
+    return -1;
+  }
+
+  // write src and sport from pkt to user memory
+  uint32 srcip = ntohl(pkt.srcip);
+  uint16 sport = pkt.sport;
+  if (copyout(p->pagetable, src_addr, (char *)&srcip, sizeof(srcip)) < 0 ||
+      copyout(p->pagetable, sport_addr, (char *)&sport, sizeof(sport)) < 0) {
+    kfree(pkt.data);
+    return -1;
+  }
+
+  // free up the data now that I sent it to userspace already
+  kfree(pkt.data);
+
+  return n;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -188,10 +305,73 @@ ip_rx(char *buf, int len)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
 
-  //
-  // Your code here.
-  //
-  
+  // get ethernet frame
+  struct eth *eth = (struct eth *)buf;
+
+  // get ip header
+  struct ip *ip = (struct ip *)(eth + 1);
+
+  // only handle UDP packets
+  if (ip->ip_p != IPPROTO_UDP) {
+    kfree(buf);
+    return;
+  }
+
+  // get udp header
+  struct udp *udp = (struct udp *)(ip + 1);
+
+  // extract udp fields
+  uint16 sport = ntohs(udp->sport);
+  uint16 dport = ntohs(udp->dport);
+  uint16 udp_len = ntohs(udp->ulen);
+  char *payload = (char *)(udp + 1);
+  int payload_len = udp_len - sizeof(struct udp);
+
+  // check if the port is bound
+  int bound = 0;
+  int i;
+  for (i = 0; i < nbound; i++) {
+    if (bound_ports[i] == dport) {
+      bound = 1;
+      break;
+    }
+  }
+
+  if (!bound) {
+    kfree(buf);
+    return;
+  }
+
+  // copy payload into memory
+  char *data = kalloc();
+  if (!data) {
+    printf("ip_rx: kalloc failed\n");
+    kfree(buf);
+    return;
+  }
+  memmove(data, payload, payload_len);
+
+  // kfree buf since we already moved the useful data into the pkt
+  kfree(buf);
+
+  // store the header/payload data in the pkt
+  struct packet pkt = {
+    .srcip = ip->ip_src,
+    .sport = sport,
+    .len = payload_len,
+    .data = data
+  };
+
+  // queue / store the pkt for later
+  if (queue_pkt(&udpq[i], &pkt) < 0) {
+    // queue full; drop packet
+    printf("ip_rx: queue full for port %d\n", dport);
+    kfree(data);
+    return;
+  }
+
+  // let the recv code sleeping till data becoems available know that they can wake up and work
+  wakeup(&udpq[i]);
 }
 
 //
@@ -217,8 +397,10 @@ arp_rx(char *inbuf)
   struct arp *inarp = (struct arp *) (ineth + 1);
 
   char *buf = kalloc();
-  if(buf == 0)
+  if(buf == 0) {
+    kfree(inbuf);
     panic("send_arp_reply");
+  }
   
   struct eth *eth = (struct eth *) buf;
   memmove(eth->dhost, ineth->shost, ETHADDR_LEN); // ethernet destination = query source
