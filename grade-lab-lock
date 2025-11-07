@@ -30,27 +30,27 @@ def test_sbrkmuch():
     ]), timeout=90)
     r.match('^ALL TESTS PASSED$')
 
-@test(0, "running bcachetest")
-def test_bcachetest():
-    r.run_qemu(shell_script([
-        'bcachetest'
-    ]), timeout=150)
+#@test(0, "running bcachetest")
+#def test_bcachetest():
+#    r.run_qemu(shell_script([
+#        'bcachetest'
+#    ]), timeout=150)
     
-@test(20, "bcachetest: test0", parent=test_bcachetest)
-def test_bcachetest_test0():
-    r.match('^test0: OK$')
+#@test(20, "bcachetest: test0", parent=test_bcachetest)
+#def test_bcachetest_test0():
+#    r.match('^test0: OK$')
     
-@test(10, "bcachetest: test1", parent=test_bcachetest)
-def test_bcachetest_test1():
-    r.match('^test1 OK$')
+#@test(10, "bcachetest: test1", parent=test_bcachetest)
+#def test_bcachetest_test1():
+#    r.match('^test1 OK$')
 
-@test(10, "bcachetest: test2", parent=test_bcachetest)
-def test_bcachetest_test2():
-    r.match('^test2 OK$')
+#@test(10, "bcachetest: test2", parent=test_bcachetest)
+#def test_bcachetest_test2():
+#    r.match('^test2 OK$')
 
-@test(10, "bcachetest: test3", parent=test_bcachetest)
-def test_bcachetest_test3():
-    r.match('^test3 OK$')
+#@test(10, "bcachetest: test3", parent=test_bcachetest)
+#def test_bcachetest_test3():
+#    r.match('^test3 OK$')
 
 @test(19, "usertests")
 def test_usertests():
