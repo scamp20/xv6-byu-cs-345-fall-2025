@@ -29,7 +29,6 @@ struct udp_queue {
 
 static struct udp_queue udpq[MAX_BOUND_PORTS];
 static int bound_ports[MAX_BOUND_PORTS];
-static int nbound = 0;
 
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
@@ -43,32 +42,27 @@ static struct spinlock netlock;
 void
 netinit(void)
 {
+  printf("netinit: initializing network stack\n");
   initlock(&netlock, "netlock");
-
-  for (int i = 0; i < MAX_BOUND_PORTS; i++) {
-    bound_ports[i] = 0;
-  }
-
-  for (int i = 0; i < MAX_BOUND_PORTS; i++) {
-    udpq[i].head = 0;
-    udpq[i].tail = 0;
-    udpq[i].count = 0;
-    memset(udpq[i].pkts, 0, sizeof(udpq[i].pkts));
-  }
 }
 
 int queue_pkt(struct udp_queue *q, struct packet *p) {
-  if (q->count == MAX_QUEUE)
+  acquire(&netlock);
+  if (q->count == MAX_QUEUE) {
+    release(&netlock);
     return -1;
+  }
   q->pkts[q->tail] = *p;
   q->tail = (q->tail + 1) % MAX_QUEUE;
   q->count++;
+  release(&netlock);
   return 0;
 }
 
 int dequeue_pkt(struct udp_queue *q, struct packet *p) {
-  if (q->count == 0)
+  if (q->count == 0) {
     return -1;  // queue empty
+  }
   *p = q->pkts[q->head];
   q->head = (q->head + 1) % MAX_QUEUE;
   q->count--;
@@ -88,17 +82,20 @@ sys_bind(void)
 
   if (port < 0 || port > 65535) return -1;
 
-  for (int i = 0; i < nbound; i++) {
+  // printf("bind: requested port %d\n", port);
+  int i;
+  for (i = 0; i < MAX_BOUND_PORTS; i++) {
+    // printf("bind: checking index %d, bound_ports=%d\n", i, bound_ports[i]);
     if (bound_ports[i] == port)
       return 0; // already bound
+    else if (bound_ports[i] == 0) {
+      // printf("bind: binding port %d at index %d\n", port, i);
+      bound_ports[i] = port;
+      return 0;
+    }
   }
 
-  if (nbound < MAX_BOUND_PORTS) {
-    bound_ports[nbound] = port;
-    nbound++;
-  } else return -1; // too many ports already bound
-
-  return 0;
+  return -1; // no space left to bind new port
 }
 
 //
@@ -109,11 +106,39 @@ sys_bind(void)
 uint64
 sys_unbind(void)
 {
-  //
-  // Optional: Your code here.
-  //
+  int port;
+  argint(0, &port);
 
-  return 0;
+  if (port < 0 || port > 65535)
+    return -1;
+
+  for (int i = 0; i < MAX_BOUND_PORTS; i++) {
+    if (bound_ports[i] == port) {
+      // Free any packets currently in the queue
+      struct udp_queue *q = &udpq[i];
+      for (int j = 0; j < q->count; j++) {
+        int idx = (q->head + j) % MAX_QUEUE;
+        if (q->pkts[idx].data != 0) {
+          kfree(q->pkts[idx].data);
+          q->pkts[idx].data = 0;
+        }
+      }
+
+      // Reset queue state
+      q->head = 0;
+      q->tail = 0;
+      q->count = 0;
+
+      // Mark port as unbound
+      bound_ports[i] = 0;
+
+      // printf("unbind: unbound port %d at index %d\n", port, i);
+      return 0;
+    }
+  }
+
+  // port was not found — nothing to unbind
+  return -1;
 }
 
 //
@@ -147,11 +172,12 @@ sys_recv(void)
 
   // find bound port index
   int i;
-  for (i = 0; i < nbound; i++) {
+  for (i = 0; i < MAX_BOUND_PORTS; i++) {
     if (bound_ports[i] == dport)
       break;
   }
-  if (i == nbound)
+  printf("recv: i=%d dport=%d\n", i, dport);
+  if (i == MAX_BOUND_PORTS)
     return -1; // not bound
 
   // get the lock since sleep will handle dropping it and picking it back up
@@ -161,6 +187,7 @@ sys_recv(void)
   while (udpq[i].count == 0)
     sleep(&udpq[i], &netlock);
 
+  printf("recv: got packet on port %d\n", dport);
   // dequeue packet
   struct packet pkt;
   if (dequeue_pkt(&udpq[i], &pkt) < 0) {
@@ -329,13 +356,17 @@ ip_rx(char *buf, int len)
 
   // check if the port is bound
   int bound = 0;
+  acquire(&netlock);
   int i;
-  for (i = 0; i < nbound; i++) {
+  for (i = 0; i < MAX_BOUND_PORTS; i++) {
     if (bound_ports[i] == dport) {
       bound = 1;
       break;
     }
   }
+  release(&netlock);
+
+  // printf("ip_rx: dport=%d i=%d\n", dport, i);
 
   if (!bound) {
     kfree(buf);
@@ -350,9 +381,6 @@ ip_rx(char *buf, int len)
     return;
   }
   memmove(data, payload, payload_len);
-
-  // kfree buf since we already moved the useful data into the pkt
-  kfree(buf);
 
   // store the header/payload data in the pkt
   struct packet pkt = {
@@ -370,8 +398,12 @@ ip_rx(char *buf, int len)
     return;
   }
 
+  // kfree buf since we already moved the useful data into the pkt
+  kfree(buf);
+
   // let the recv code sleeping till data becoems available know that they can wake up and work
   wakeup(&udpq[i]);
+  printf("ip_rx: queued packet on port %d\n", dport);
 }
 
 //
