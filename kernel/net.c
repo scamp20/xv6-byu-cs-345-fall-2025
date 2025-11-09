@@ -80,6 +80,7 @@ int dequeue_pkt(struct udp_queue *q, struct packet *p) {
 uint64
 sys_bind(void)
 {
+  acquire(&netlock);
   int port;
   argint(0, &port);
 
@@ -89,15 +90,18 @@ sys_bind(void)
   int i;
   for (i = 0; i < MAX_BOUND_PORTS; i++) {
     // printf("bind: checking index %d, bound_ports=%d\n", i, bound_ports[i]);
-    if (bound_ports[i] == port)
+    if (bound_ports[i] == port) {
+      release(&netlock);
       return 0; // already bound
-    else if (bound_ports[i] == 0) {
+    } else if (bound_ports[i] == 0) {
       // printf("bind: binding port %d at index %d\n", port, i);
       bound_ports[i] = port;
+      release(&netlock);
       return 0;
     }
   }
 
+  release(&netlock);
   return -1; // no space left to bind new port
 }
 

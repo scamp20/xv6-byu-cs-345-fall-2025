@@ -155,6 +155,7 @@ e1000_recv(void)
     void *newbuf = kalloc();
     if (!newbuf) {
       printf("e1000_recv: kalloc failed\n");
+      release(&e1000_lock);
       return;
     }
 
@@ -163,15 +164,12 @@ e1000_recv(void)
     rx_ring[idx].addr = (uint64)newbuf;
     rx_ring[idx].status = 0;
 
-    // set rdt to be most recently received slot
-    rdt = idx;
+    // update RDT to indicate we've processed this slot
+    regs[E1000_RDT] = idx;
 
     // just for the for loop
     idx = (idx + 1) % RX_RING_SIZE;
   }
-
-  // save rdt for later
-  regs[E1000_RDT] = rdt;
 
   // release lock
   release(&e1000_lock);
