@@ -237,3 +237,8 @@ void            netinit(void);
 void            net_rx(char *buf, int len);
 
 #endif
+
+// LAB_MMAP
+uint64          proc_mmap(uint64 addr, int len, int prot, int flags, int fd, int offset);
+int             proc_munmap(uint64 addr, int len);
+int             handle_page_fault(uint64);

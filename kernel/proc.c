@@ -3,8 +3,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -145,6 +149,13 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  // initialize vmas
+  for(int i = 0; i < 16; i++) {
+    memset(&p->vmas[i], 0, sizeof(struct vma));
+  }
+
+  p->last_mmap = TRAPFRAME - (PGSIZE*2); // Initialize last_mmap
 
   return p;
 }
@@ -312,6 +323,20 @@ fork(void)
 
   pid = np->pid;
 
+  // copy parent's vmas
+  acquire(&p->lock);
+  for (int i = 0; i < 16; i++) {
+    if (p->vmas[i].used) {
+      np->vmas[i] = p->vmas[i];
+
+      // increase file reference count
+      if (p->vmas[i].file) {
+        np->vmas[i].file = filedup(p->vmas[i].file);
+      }
+    }
+  }
+  release(&p->lock);
+
   release(&np->lock);
 
   acquire(&wait_lock);
@@ -357,6 +382,12 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  for (int i = 0; i < 16; i++) {
+    if (p->vmas[i].used) {
+        proc_munmap(p->vmas[i].addr, p->vmas[i].len);
     }
   }
 
@@ -692,4 +723,195 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// mmap system call
+uint64 proc_mmap(uint64 addr, int len, int prot, int flags, int fd, int offset) {
+  struct proc *p = myproc();
+  struct vma  *v;
+  for (int i =0; i < 16; i++) {
+    if (p->vmas[i].used == 0) {
+      v = &p->vmas[i];
+
+      struct file *f = p->ofile[fd];
+      if (!f)
+        return -1;
+
+      // enforce file permissions vs requested prot
+      if (f->writable == 0 && (prot & PROT_WRITE) && (flags & MAP_SHARED)) {
+        return -1;
+      }
+
+      v->file = filedup(f);
+      v->used = 1;
+      v->len = len;
+      v->prot = prot;
+      v->flags = flags;
+      v->fd = fd;
+      v->offset = offset;
+      // Find a suitable address
+      // Grow down from beneath the trap frame
+      v->addr = PGROUNDDOWN(p->last_mmap - len);
+      p->last_mmap = v->addr - PGSIZE;
+      
+      return v->addr;
+    }
+  }
+
+  return -1;
+}
+
+// munmap system call
+int proc_munmap(uint64 addr, int len) {
+  struct proc *p = myproc();
+
+  // find the VMA
+  struct vma *v = 0;
+  for (int i = 0; i < 16; i++) {
+    if (p->vmas[i].used) {
+      // if address is within this VMA range
+      uint64 start = p->vmas[i].addr;
+      uint64 end = p->vmas[i].addr + p->vmas[i].len;
+      if (addr >= start && addr < end) {
+        // found it
+        v = &p->vmas[i];
+        break;
+      }
+    }
+  }
+  if (v == 0) return -1;
+
+  // unmap pages from page table
+  uint64 a = PGROUNDDOWN(addr);
+  uint64 end_addr = addr + len;
+
+  // handle if end_addr exceeds VMA
+  uint64 vma_start = v->addr;
+  uint64 vma_end = v->addr + v->len;
+  if (end_addr > vma_end) {
+    end_addr = vma_end;
+  }
+
+  //for each page in the range
+  while (a < end_addr) {
+    // get the PTE
+    pte_t *pte = walk(p->pagetable, a, 0);
+    // if valid, check if it's dirty
+    if (pte && *pte & PTE_V) {
+      // checking map_shared and prot write instead of PTE_D because I'm not
+      // confident PTE_D is being set correctly since it's not already declared.
+      // And I'm pretty sure this is accurate enough for the assignment.
+      if ((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)) {
+        // write back to file
+        ilock(v->file->ip);
+
+        uint64 pa = PTE2PA(*pte);
+        uint64 file_offset = v->offset + (a - v->addr);
+        uint64 fsize = v->file->ip->size;
+        uint to_write = (fsize - file_offset) > PGSIZE ? PGSIZE : (fsize - file_offset);
+        begin_op();
+        writei(v->file->ip, 0, (uint64)pa, (uint)file_offset, to_write);
+        end_op();
+
+        iunlock(v->file->ip);
+      }
+      // unmap the page
+      uvmunmap(p->pagetable, a, 1, 1);
+    }
+    // next page
+    a += PGSIZE;
+  }
+
+  // update VMA
+  if (addr <= vma_start && end_addr >= vma_end) {
+    // entire VMA unmapped
+    fileclose(v->file);
+    memset(v, 0, sizeof(*v)); // reset VMA
+  } else {
+    // partial unmap - shrink VMA
+    if (addr <= vma_start) {
+      // unmapping from start
+      uint64 shrink_amount = end_addr - vma_start;
+      v->addr += shrink_amount;
+      v->len -= shrink_amount;
+      v->offset += shrink_amount;
+    } else if (end_addr >= vma_end) {
+      // unmapping from end
+      uint64 shrink_amount = vma_end - addr;
+      v->len -= shrink_amount;
+    } else {
+      // unmapping from middle not allowed
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+// here we create page table entries for mmapped pages upon page fault and enforce protections
+int handle_page_fault(uint64 va) {
+  struct proc *p = myproc();
+  for (int i = 0; i < 16; i++) {
+    struct vma *v = &p->vmas[i];
+    if (v->used) {
+      if (va >= v->addr && va < v->addr + v->len) {
+        // found the VMA
+
+        // Is the va already associated with a PTE?
+        pte_t *pte = walk(p->pagetable, PGROUNDDOWN(va), 0);
+        if (pte && (*pte & PTE_V)) {
+          // already mapped, protection violation
+          return -1;
+        }
+
+        // allocate an empty page
+        uint64 pa = (uint64)kalloc();
+        if (pa == 0)
+          return -1;
+        memset((void*)pa, 0, PGSIZE);
+
+        // read from file into the page (we'll map it later/below)
+        if (v->file) {
+          ilock(v->file->ip);
+
+          // calculate file offset (force the read to be page-aligned by PGROUNDDOWN)
+          uint64 file_offset = v->offset + (PGROUNDDOWN(va) - v->addr);
+          uint64 fsize = v->file->ip->size;
+
+          // is the file offset already beyond the file size?
+          if (file_offset < fsize) {
+              uint64 to_read = PGSIZE;
+              // adjust to_read to not exceed file size
+              if (file_offset + to_read > fsize)
+                  to_read = fsize - file_offset;
+
+              // read the data from file into the allocated page
+              readi(v->file->ip, 0, pa, (uint)file_offset, (uint)to_read);
+          } else {
+            // tried to read beyond file size, free page and return error
+            iunlock(v->file->ip);
+            kfree((void*)pa);
+            return -1;
+          }
+          iunlock(v->file->ip);
+        }
+
+        // get the file permissions
+        int perm = PTE_U;
+        if (v->prot & PROT_READ) perm |= PTE_R;
+        if (v->prot & PROT_WRITE) perm |= PTE_W;
+        // if (v->prot & PROT_EXEC) perm |= PTE_X; // not needed for assignment
+
+        // map the page into the process's page table
+        if (mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, pa, perm) != 0) {
+          kfree((void*)pa);
+          return -1;
+        }
+
+        return 0;
+      }
+    }
+  }
+  
+  return -1;
 }

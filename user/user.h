@@ -20,6 +20,8 @@ int unlink(const char*);
 int fstat(int fd, struct stat*);
 int link(const char*, const char*);
 int mkdir(const char*);
+void* mmap(void *addr, int len, int prot, int flags, int fd, int offset);
+int munmap(void *addr, int len);
 int chdir(const char*);
 int dup(int);
 int getpid(void);
